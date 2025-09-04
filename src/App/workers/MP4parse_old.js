@@ -660,7 +660,8 @@ MP4.sampleTables.entrySize = {
 		stco : 4,
 		stsz : 4,
 		stsd : 0,
-		elst : 12
+		elst : 12,
+		stdp : 2
 }
 
 MP4.isValidAtom = function(atomType) {
