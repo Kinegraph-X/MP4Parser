@@ -113,6 +113,28 @@ var stringFromUint32 = function(buffer, start = 0) {
 	return String.fromCharCode(...normalizedArray);
 }
 
+/**
+ * @function getNullTerminatedString
+ * Buffer manipulation Helper
+ * @param {Uint8Array|DataView} buf
+ * @param {number} pos
+ */
+const getNullTerminatedString = function(buf, pos) {
+	const strAsArray = [];
+	let i = 0, getter, res = 0;
+	
+	if (buf instanceof DataView)
+		getter = (pos) => buf.getUint8(pos);
+	else
+		getter = (pos) => buf[pos];
+		
+	while ((res = getter(pos + i)) !== 0) {
+		strAsArray.push(res);
+		i++;
+	}
+	return String.fromCharCode(...strAsArray);
+}
+
 
 // CONSTANTS
 
@@ -135,7 +157,7 @@ class MP4Box {
 	 * @param {number} size total box size (32/64-bit, as parsed)
 	 * @param {number} pos  file offset where the box header starts
 	 */
-	constructor(size = 0, pos = 0) {
+	constructor(pos = 0, size = 0) {
 		this.size = size;
 		this.pos = pos;
 	}
@@ -168,6 +190,14 @@ class MP4FullBox extends MP4Box {
 	getTable() {
 		return this.data;
 	}
+}
+
+/**
+ * @template {MP4Box} C
+ */
+class ContainerBox extends MP4Box {
+	/** @type {C[]} */
+	children = [];
 }
 
 
@@ -294,19 +324,7 @@ class UrnBox extends MP4FullBox {
 }
 
 /**
- * DataReferenceBox
- * (declares source(s) of media in track, as url, urn, or both)
- */
-class DrefBox extends MP4FullBox {
-	type = "dref";
-	entryCount = 0;
-	dataRefEntry = "";
-}
-
-
-
-/**
- * Sample Description Box
+ * Sample Description Box (class to be derived, e.g in avc1)
  * (codec types, initialization etc)
  */
 
@@ -317,11 +335,50 @@ class SampleEntry extends MP4Box {
 	// should be derived, so other props are codec-dependant
 }
 
-class StsdBox extends MP4FullBox {
-	type = "stsd";
-	entryCount = 0;
-	// each entry is an instance of a class derived from SampleEntry 
-	data = new Uint8Array(0);
+
+class AcvCBox extends MP4Box {
+	type = "avcC";
+	version = 0; 
+	//    -> 1 byte H.264 profile = 8-bit unsigned stream profile
+	profile = ''; 	// Baseline : 42, Main : 4D, High : 64  https://wiki.whatwg.org/wiki/video_type_parameters#Video_Codecs_3
+	profile_HR = ''; 	
+	//    -> 1 byte H.264 compatible profiles = 8-bit hex flags
+	compatible_profiles = '';
+	//    -> 1 byte H.264 level = 8-bit unsigned stream level
+	level = 0; 
+	//    -> 1 1/2 nibble reserved = 6-bit unsigned value set to 63
+	reserved = 0; 
+	//    -> 1/2 nibble NAL length = 2-bit length byte size type : 1 byte = 0 ; 2 bytes = 1 ; 4 bytes = 3
+	NAL_length = 0; 
+	//    -> 1 byte number of SPS = 8-bit unsigned total
+	number_of_SPS = 0; 
+	//    -> 2+ bytes SPS length = short unsigned length
+	SPS_length = 0; 
+	// -> + SPS NAL unit = hexdump
+	SPS_NAL_unit = '';
+	//    -> 1 byte number of PPS = 8-bit unsigned total
+	number_of_PPS = 0; 
+	//    -> 2+ bytes PPS length = short unsigned length
+	PPS_length = 0; 
+	//  -> + PPS NAL unit = hexdump
+	PPS_NAL_unit = '';
+}
+
+class PaspBox extends MP4FullBox {
+	type = "pasp";
+	box.hSpacing = 0;
+	box.vSpacing = 0;
+}
+
+class EsdsBox extends MP4FullBox {
+	type = "esds";
+}
+
+class SampleEntry extends MP4Box {
+	type = "";
+	reserved = null;
+	dataReferenceIndex = 0;
+	// should be derived, so other props are codec-dependant
 }
 
 /**
@@ -409,9 +466,8 @@ class StszBox extends MP4FullBox {
 	type = "stsz";
 	entrySize = 4;
 	columnNames = ['entry_size'];
-	entrySize = 4;
 	sampleSize = 0;
-	sampleCount = 0;
+	entryCount = 0;
 	data = new Uint8Array(0);
 }
 
@@ -592,13 +648,7 @@ class CprtBox extends MP4FullBox {
 }
 
 
-/**
- * @template {MP4Box} C
- */
-class ContainerBox extends MP4Box {
-	/** @type {C[]} */
-	children = [];
-}
+
 
 
 
@@ -628,10 +678,60 @@ class UdtaBox extends ContainerBox { type = "udta"; }
 class EdtsBox extends ContainerBox { type = "edts"; }
 
 /**
+ * Data Reference Box
+ * @extends {ContainerBox<UrnBox|UrlBox>}
+ * (declares source(s) of media in track, as url, urn, or both)
+ */
+class DrefBox extends ContainerBox {
+	version = '';
+	flags = new Uint8Array(3);
+	type = "dref";
+	entryCount = 0;
+}
+
+/**
  * Data Information Box
  * @extends {ContainerBox<DrefBox>}
  */
 class DinfBox extends ContainerBox { type = "dinf"; }
+
+/**
+ * AVC format Descriptor
+ * @extends {ContainerBox<AvcCBox|PaspBox>}
+ */
+class Avc1Box extends ContainerBox {
+	type = "avc1";
+	// int32 if not specified
+	reserved = 0;	// int8[6]
+	dataReferenceIndex = 0; // int16
+	version = 0;			// int16
+	revisionLevel = 0;		// int16
+	vendor = 0;				
+	temporalQuality = 0;
+	spatialQuality = 0;
+	width = 0				// int16
+	height = 0				// int16
+	horizontalResolution = 0;
+	verticalResolution = 0;
+	dataSize = 0;
+	frameCount = 0;			// int16 (nbr of frames in a sample)
+	videoEncodingNameSize = 0;// int8
+	videoEncodingName = '';	// 31 bytes
+	depth = 0;				// int116 (bit depth of a pixel)
+	colorTableId = 0;		// int16
+	
+}
+
+/**
+ * Sample Descriptor (special) box (contains derived atoms from SampleEntry, most frequently avc1 type)
+ * @extends {ContainerBox<Avc1Box>}
+ */
+class StsdBox extends ContainerBox {
+	type = "stsd";
+	entryCount = 0;
+	// each entry is an instance of a class derived from SampleEntry 
+	data = new Uint8Array(0);
+}
 
 /**
  * Sample Tables Box
@@ -728,6 +828,10 @@ const BoxRegistry = {
 	minf: MinfBox,
 	stbl: StblBox,
 	stsd: StsdBox,
+	avc1: Avc1Box,
+	avcC: AvcCBox,
+	pasp: PaspBox,
+	esds: EsdsBox,
 	stdp: StdpBox,
 	stts: SttsBox,
 	ctts: CttsBox,
@@ -750,8 +854,7 @@ const BoxRegistry = {
 	dref: DrefBox,
 	btrt: BtrtBox,
 	mehd: MehdBox,
-	trex: TraxBox,
-	trax: TraxBox,
+	trex: TrexBox,
 	mfhd: MfhdBox,
 	traf: TrafBox,
 	tfhd: TfhdBox,
@@ -1231,6 +1334,10 @@ class AtomParser {
 		const box = new BoxRegistry[fourcc](currentPos, size);
 		parentAtom.children.push(box);
 		let offset = this.versionAndFlags(currentPos, box);
+		
+		box.entryCount = this.headerView.getUint32(offset);
+		offset += 4;
+		box.data = new Uint8Array(this.headerView.buffer, offset, offset + box.entryCount * box.entrySize);
 		return new ParsingResult(true, box);
 	}
 
@@ -1276,6 +1383,15 @@ class AtomParser {
 		const box = new BoxRegistry[fourcc](currentPos, size);
 		parentAtom.children.push(box);
 		let offset = this.versionAndFlags(currentPos, box);
+		// pre-defined 4
+		offset += 4;
+		box.handlerType = stringFromBuffer(
+			new Uint8Array(this.headerView.buffer.slice(offset, offset + 4))
+		);
+		// reserved 12
+		offset += 16;
+		box.name = getNullTerminatedString(this.headerView, offset);
+		
 		return new ParsingResult(true, box);
 	}
 
@@ -1321,7 +1437,55 @@ class AtomParser {
 		const box = new BoxRegistry[fourcc](currentPos, size);
 		parentAtom.children.push(box);
 		let offset = this.versionAndFlags(currentPos, box);
+		box.entryCount = this.headerView.getUint32(offset);
+		offset += 4;
+		while(offset < currentPos + size) {
+			const nextSize = this.headerView.getUint32(offset);
+			offset += 4;
+			const nextType = stringFromUint32(this.headerView, offset);
+			if (this[nextType])
+				this[nextType](nextType, offset - 4, nextSize, box);
+			offset += nextSize;
+		}
+		
+		// isLeaf = true, cause we've already parsed the children (table contains max 2 values)
 		return new ParsingResult(true, box);
+	}
+	
+	/**
+	 * @method
+	 * @param {keyof BoxRegister} fourcc
+	 * @param {number} currentPos
+	 * @param {number} size
+	 * @param {DrefBox} parentAtom
+	 * @return undefined
+	 */
+	['urn '](fourcc, currentPos, size, parentAtom) {
+		const box = new BoxRegistry[fourcc](currentPos, size);
+		parentAtom.children.push(box);
+		let offset = this.versionAndFlags(currentPos, box);
+		if (size === 12)	// empty entry
+			return;
+		box.name = getNullTerminatedString(this.headerView, offset);
+		offset += box.name.length;
+		box.location = getNullTerminatedString(this.headerView, offset);
+	}
+	
+	/**
+	 * @method
+	 * @param {keyof BoxRegister} fourcc
+	 * @param {number} currentPos
+	 * @param {number} size
+	 * @param {DrefBox} parentAtom
+	 * @return undefined
+	 */
+	['url '](fourcc, currentPos, size, parentAtom) {
+		const box = new BoxRegistry[fourcc](currentPos, size);
+		parentAtom.children.push(box);
+		let offset = this.versionAndFlags(currentPos, box);
+		if (size === 12)	// empty entry
+			return;
+		box.location = getNullTerminatedString(this.headerView, offset);
 	}
 
 	/**
@@ -1351,6 +1515,9 @@ class AtomParser {
 		const box = new BoxRegistry[fourcc](currentPos, size);
 		parentAtom.children.push(box);
 		let offset = this.versionAndFlags(currentPos, box);
+		box.entryCount = this.headerView.getUint32(offset);
+		offset += 4;
+		box.data = new Uint8Array(this.headerView.buffer.slice(offset, offset + box.entryCount * box.entrySize));
 		return new ParsingResult(true, box);
 	}
 
@@ -1366,6 +1533,9 @@ class AtomParser {
 		const box = new BoxRegistry[fourcc](currentPos, size);
 		parentAtom.children.push(box);
 		let offset = this.versionAndFlags(currentPos, box);
+		box.entryCount = this.headerView.getUint32(offset);
+		offset += 4;
+		box.data = new Uint8Array(this.headerView.buffer.slice(offset, offset + box.entryCount * box.entrySize));
 		return new ParsingResult(true, box);
 	}
 
@@ -1381,6 +1551,9 @@ class AtomParser {
 		const box = new BoxRegistry[fourcc](currentPos, size);
 		parentAtom.children.push(box);
 		let offset = this.versionAndFlags(currentPos, box);
+		box.entryCount = this.headerView.getUint32(offset);
+		offset += 4;
+		box.data = new Uint8Array(this.headerView.buffer.slice(offset, offset + box.entryCount * box.entrySize));
 		return new ParsingResult(true, box);
 	}
 
@@ -1396,7 +1569,201 @@ class AtomParser {
 		const box = new BoxRegistry[fourcc](currentPos, size);
 		parentAtom.children.push(box);
 		let offset = this.versionAndFlags(currentPos, box);
+		box.entryCount = this.headerView.getUint32(offset);
+		offset += 4;
+		// Seems compatibility with Apple mov format : 
+		// - apple mov : 2 first int32 are size & formatId
+		// - mp4 ISO: 2 first int32 are considered size & atomType
+		// (and, for example, avcC & pasp are always included in avc1, without avc1 being described as a table by apple.)
+		const nextSize = this.headerView.getUint32(offset);
+		offset += 4;
+		const nextType = stringFromUint32(this.headerView, offset);
+		offset += 4;
+		if (this[nextType])
+			this[nextType](nextType, offset, nextSize, box);
+//		box.data = new Uint8Array(this.headerView.buffer.slice(offset, offset + box.entryCount * box.entrySize));
+		
+		// isLeaf = true, see above com
 		return new ParsingResult(true, box);
+	}
+	
+	/**
+	 * @method
+	 * @param {keyof BoxRegister} fourcc
+	 * @param {number} currentPos
+	 * @param {number} size
+	 * @param {StsdBox} parentAtom
+	 * @return {ParsingResult}
+	 */
+	avc1(fourcc, currentPos, size, parentAtom) {
+		const box = new BoxRegistry[fourcc](currentPos, size);
+		parentAtom.children.push(box);
+		let offset = currentPos;
+		
+//		reserved = 0;	// int8[6]
+		offset += 6;
+		dataReferenceIndex = this.headerView.getUint16(offset);
+		offset += 2;
+		version = this.headerView.getUint16(offset);
+		offset += 2;
+		revisionLevel = this.headerView.getUint16(offset);
+		offset += 2;
+		vendor = this.headerView.getUint32(offset);	
+		offset += 4;
+		temporalQuality = this.headerView.getUint32(offset);
+		offset += 4;
+		spatialQuality = this.headerView.getUint32(offset);
+		offset += 4;
+		width = this.headerView.getUint16(offset);
+		offset += 2;
+		height = this.headerView.getUint16(offset);
+		offset += 2;
+		horizontalResolution = this.headerView.getUint32(offset);
+		offset += 4;
+		verticalResolution = this.headerView.getUint32(offset);
+		offset += 4;
+		dataSize = this.headerView.getUint32(offset);
+		offset += 4;
+		frameCount = this.headerView.getUint16(offset);
+		offset += 2;
+		videoEncodingNameSize = this.headerView.getUint8(offset);
+		offset += 1;
+		videoEncodingName = getNullTerminatedString(this.headerView, offset);
+		offset += 31;
+		depth = this.headerView.getUint16(offset);
+		offset += 2;
+		colorTableId = this.headerView.getUint16(offset);
+		offset += 2;
+		
+		while(offset < currentPos + size - 8) {
+			const nextSize = this.headerView.getUint32(offset);
+			offset += 4;
+			const nextType = stringFromUint32(this.headerView, offset);
+			offset += 4;
+			if (this[nextType])
+				this[nextType](nextType, offset, nextSize, box);
+			offset += nextSize - 8;
+		}
+	}
+	
+	/**
+	 * @method
+	 * @param {keyof BoxRegister} fourcc
+	 * @param {number} currentPos
+	 * @param {number} size
+	 * @param {Avc1Box} parentAtom
+	 * @return undefined
+	 */
+	avcC(fourcc, currentPos, size, parentAtom) {
+		const box = new BoxRegistry[fourcc](currentPos, size);
+		parentAtom.children.push(box);
+		let offset = currentPos;
+		
+		//	-> 1 byte version = 8-bit hex version  (current = 1)
+		box.version = this.headerView.getUint8(offset); 
+		offset += 1;
+		//    -> 1 byte H.264 profile = 8-bit unsigned stream profile
+		box.profile = zeroFill(this.headerBuffer.getUint8(offset).toString(16), 2); 	// Baseline : 42, Main : 4D, High : 64  https://wiki.whatwg.org/wiki/video_type_parameters#Video_Codecs_3
+		box.profile_HR = this.profileTable[box.profile]; 	
+		offset += 1;
+		//    -> 1 byte H.264 compatible profiles = 8-bit hex flags
+		box.compatible_profiles = zeroFill(this.headerView.getUint8(offset).toString(16), 2);
+		offset += 1;
+		//    -> 1 byte H.264 level = 8-bit unsigned stream level
+		box.level = this.headerView.getUint8(offset); 
+		offset += 1;
+		//    -> 1 1/2 nibble reserved = 6-bit unsigned value set to 63
+		box.reserved = this.headerView.getUint8(offset) >>> 6; 
+		//    -> 1/2 nibble NAL length = 2-bit length byte size type : 1 byte = 0 ; 2 bytes = 1 ; 4 bytes = 3
+		box.NAL_length = this.headerView.getUint8(offset) & 0x03; 
+		offset += 1;
+		//    -> 1 byte number of SPS = 8-bit unsigned total
+		box.number_of_SPS = this.headerView.getUint8(offset); 
+		offset += 1;
+		//    -> 2+ bytes SPS length = short unsigned length
+		box.SPS_length = this.headerView.getUint16(offset); 
+		offset += 2;
+		// -> + SPS NAL unit = hexdump
+		box.SPS_NAL_unit = '0x';
+		for (var i = 0, l = box.SPS_length; i < l; i++) {
+			box.SPS_NAL_unit += zeroFill(this.headerView.getUint8(offset).toString(16), 2);
+			offset += 1;
+		}
+		//    -> 1 byte number of PPS = 8-bit unsigned total
+		box.number_of_PPS = this.headerView.getUint8(offset); 
+		offset += 1;
+		//    -> 2+ bytes PPS length = short unsigned length
+		box.PPS_length = this.headerView.getUint16(offset); 
+		offset += 2;
+		//  -> + PPS NAL unit = hexdump
+		box.PPS_NAL_unit = '0x';
+		for (var i = 0, l = box.PPS_length; i < l; i++) {
+			box.PPS_NAL_unit += zeroFill(this.headerView.getUint8(offset).toString(16), 2);
+			offset += 1;
+		}
+	}
+	
+	/**
+	 * @method
+	 * @param {keyof BoxRegister} fourcc
+	 * @param {number} currentPos
+	 * @param {number} size
+	 * @param {Avc1Box} parentAtom
+	 * @return undefined
+	 */
+	pasp(fourcc, currentPos, size, parentAtom) {
+		const box = new BoxRegistry[fourcc](currentPos, size);
+		parentAtom.children.push(box);
+		let offset = currentPos;
+		box.hSpacing = this.headerView.getUint32(offset);
+		box.vSpacing = this.headerView.getUint32(offset);
+	}
+	
+	/**
+	 * @method
+	 * @param {keyof BoxRegister} fourcc
+	 * @param {number} currentPos
+	 * @param {number} size
+	 * @param {Avc1Box} parentAtom
+	 * @return undefined
+	 */
+	esds(fourcc, currentPos, size, parentAtom) {
+		const box = new BoxRegistry[fourcc](currentPos, size);
+		parentAtom.children.push(box);
+		let offset = this.versionAndFlags(currentPos, box);
+		
+		box.ES_descriptor_type = '0x' + this.headerView.getUint8(offset).toString(16); // 0x03
+		offset += 1;
+	
+		//3 bytes optional extended descriptor type tag string
+		let tag_string;
+		if ([0x80, 0x81, 0xFE].indexOf(this.headerView.getUint8(offset)) !== -1) {
+			tag_string = this.headerView.getUint32(offset);
+			offset += 3;
+		}
+		
+		// length remaining after length_byte :  as found on real cases : length includes 0x04, 0x05 and 0x06 ES_Descriptor (should exclude trailing descriptors)
+		box.descriptor_length = this.headerView.getUint8(offset);
+		offset += 1;
+		
+		box.ES_ID = this.headerView.getUint16(offset);
+		offset += 2;
+		
+		const tags = this.headerView.getUint8(offset);
+		box.stream_dependance_flag = tags & 0x80;
+		box.url_flag = tags & 0x40;
+		box.stream_priority = (tags << 3) >>> 3;
+		offset += 1;
+		
+		// ISO_IEC_14496-1_1998 p24 (pdf p47)
+		// if (URL_Flag)
+		// 		bit(8) URLstring[length-3-(streamDependencFlag*2)];
+		if (box.url_flag) {
+			offset += box.descriptor_length - 3 - box.stream_dependance_flag * 2;
+		}
+		
+		blockContent['ES_descriptor'] = this.parse_ES_descriptor(blockContent['descriptor_length']) 	// -3 -5
+		
 	}
 
 	/**
@@ -1411,6 +1778,11 @@ class AtomParser {
 		const box = new BoxRegistry[fourcc](currentPos, size);
 		parentAtom.children.push(box);
 		let offset = this.versionAndFlags(currentPos, box);
+		box.sampleSize = this.headerView.getUint32(offset);
+		offset += 4;
+		box.entryCount = this.headerView.getUint32(offset);
+		offset += 4;
+		box.data = new Uint8Array(this.headerView.buffer.slice(offset, offset + box.entryCount * box.entrySize));
 		return new ParsingResult(true, box);
 	}
 
@@ -1426,6 +1798,9 @@ class AtomParser {
 		const box = new BoxRegistry[fourcc](currentPos, size);
 		parentAtom.children.push(box);
 		let offset = this.versionAndFlags(currentPos, box);
+		box.entryCount = this.headerView.getUint32(offset);
+		offset += 4;
+		box.data = new Uint8Array(this.headerView.buffer.slice(offset, offset + box.entryCount * box.entrySize));
 		return new ParsingResult(true, box);
 	}
 
@@ -1441,6 +1816,9 @@ class AtomParser {
 		const box = new BoxRegistry[fourcc](currentPos, size);
 		parentAtom.children.push(box);
 		let offset = this.versionAndFlags(currentPos, box);
+		box.entryCount = this.headerView.getUint32(offset);
+		offset += 4;
+		box.data = new Uint8Array(this.headerView.buffer.slice(offset, offset + box.entryCount * box.entrySize));
 		return new ParsingResult(true, box);
 	}
 
@@ -1456,6 +1834,9 @@ class AtomParser {
 		const box = new BoxRegistry[fourcc](currentPos, size);
 		parentAtom.children.push(box);
 		let offset = this.versionAndFlags(currentPos, box);
+		box.entryCount = this.headerView.getUint32(offset);
+		offset += 4;
+		box.data = new Uint8Array(this.headerView.buffer.slice(offset, offset + box.entryCount * box.entrySize));
 		return new ParsingResult(true, box);
 	}
 
@@ -1496,7 +1877,7 @@ class AtomParser {
 		
 		// We must parse the flags for this atom
 		offset -= 3;
-		const flags = this.headerBuffer.getUint32(offset) >> 8;
+		const flags = this.headerView.getUint32(offset) >> 8;
 		const computedFlags = {
 			base_data_offset_present : flags & 0x000001,
 			sample_description_index_present : flags & 0x000002,
@@ -1550,7 +1931,7 @@ class AtomParser {
 		
 		// We must parse the flags for this atom
 		offset -= 3;
-		const flags = this.headerBuffer.getUint32(offset) >> 8;
+		const flags = this.headerView.getUint32(offset) >> 8;
 		const computedFlags = {
 			data_offset_present : (flags & 0x000001) > 0,
 			first_sample_flags_present : (flags & 0x000004) > 0,
@@ -1608,6 +1989,27 @@ class AtomParser {
 			this.headerView.getUint8(currentPos + 3),
 		], 0);
 		return currentPos + 4;
+	}
+	
+	
+	
+	
+	
+	
+	
+	
+	
+	codecTable = {
+		avc1 : 'H264', 
+		mp4v : 'MPEG4 Visual',
+		encv : 'ISO/IEC 14496-12 or 3GPP',
+		s263 : '3GPP H.263v1'
+	}
+	
+	profileTable = {
+		'42' : 'Baseline', 
+		'4d' : 'Main',
+		'64' : 'High',
 	}
 }
 
