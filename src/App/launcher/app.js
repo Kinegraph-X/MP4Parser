@@ -1,10 +1,11 @@
 const {App, TemplateFactory} = require('formantjs');
-const MP4ParserCode = require('src/App/workers/MP4parse.worker').default; // code bundled as string is exposed as an ESmodule
+//const MP4ParserCode = require('src/App/workers/MP4parse.worker').default; // code bundled as string is exposed as an ESmodule
 const videoFileModel = require('src/App/valueObjects/videoFileModel');
 const normalizeTree = require('src/App/transform/MP4ParserTreeNormalize');
 
 const testFilename = 'Big_Buck_Bunny_360_10s_2MB.mp4';
 const testFilePath = 'test_files/' + testFilename;
+const workerPath = 'workers/MP4ParserWorker.js';
 
 /**
  * @factory MP4Parser
@@ -19,18 +20,19 @@ module.exports = function(parentView) {
 			
 			const dropZone = new App.componentTypes.FileDropZone(TemplateFactory.mockDef(), root.view);
 			const UIStructureComponent = new App.coreComponentLib.FlexRowComponent(TemplateFactory.mockGroupDef(), root.view);
-			const parser = new App.Worker('mp4Parser', MP4ParserCode);
+			const parser = new App.Worker('mp4Parser', null, workerPath);
 			
 			const self = this;
 			var parserHandlers = {
 					'initSuccess' : function(responsePayload) {
-						parser.postMessage('parseMp4');
+//						console.log(responsePayload);
+						parser.postMessage('parse');
 //						if (headerAsTreeHR)
 //							resetApp();
 					},
 					'parseSuccess' : function(responsePayload) {
-						console.log(responsePayload.moov);
-						self.treeTest(responsePayload.moov, root.view);
+						console.log(responsePayload);
+//						self.treeTest(responsePayload.moov, root.view);
 //						videoFileModel.setMediaInfo(responsePayload);
 //						dropZone.updateCurrently(videoFileModel.data.title);
 					}
@@ -42,7 +44,7 @@ module.exports = function(parentView) {
 			fetch(testFilePath).then(r => {
 				r.blob().then(function(blob) {
 					const file = new File([blob], testFilename);
-					videoFileModel.populateFromFileObj({data : file});
+//					videoFileModel.populateFromFileObj({data : file});
 					parser.postMessage('init', {data : file});				
 				});
 			});

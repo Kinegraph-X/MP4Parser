@@ -1,4 +1,3 @@
-import Types from './Types.js';
 
 /**
  * MP4Parser
@@ -88,11 +87,14 @@ const buffer8getUint32 = function(pos, tArray, littleEndian = false) {
  * (DataViews can't be dynamically sliced => let's for now assign a new buffer)
  * @param {DataView|Uint8Array} buffer
  * @param {number} start
- * @param {number} length
+ * @param {number|null} length
  */
-const stringFromBuffer = function(buffer, start = 0, length = 0) {
+const stringFromBuffer = function(buffer, start = 0, length = null) {
 	let endPos;
-	if (length)
+	if (length === 0) {
+		return '';
+	}
+	if (length !== null)
 		endPos = start + length;
 	else
 		endPos = buffer.byteLength;
@@ -826,8 +828,8 @@ class Avc1Box extends ContainerBox {
 	verticalResolution = 0;
 	dataSize = 0;
 	frameCount = 0;			// uint16 (nbr of frames in a sample)
-	videoEncodingNameSize = 0;// uint8
-	videoEncodingName = '';	// 31 bytes
+	compressorNameSize = 0;// uint8
+	compressorName = '';	// 31 bytes
 	depth = 0;				// uint116 (bit depth of a pixel)
 	colorTableId = 0;		// uint16
 }
@@ -1071,16 +1073,60 @@ function createBox(fourcc, pos = 0, size = 0) {
 //};
 
 
+class ParserCtx {
+	handlerType = '';
+	trackId = 0;
+	constructor(handlerType = "", trackId = 0) {
+		this.handlerType = handlerType;
+		this.trackId = trackId;
+	}
+}
 
 class ParserWorkTask {
 	/** @type {MP4Box} */ parent;
-	pos = 0;
-	size = 0;
-	constructor(parent, pos, end) {
+	/** @type {ParserCtx} */ parserCtx;
+	start = 0;
+	end = 0;
+	constructor(parent, pos, end, parserCtx = new ParserCtx()) {
 		this.parent = parent;
 		this.start = pos;
 		this.end = end;
+		this.parserCtx = parserCtx;
 	}
+}
+
+class FastAccessNode {
+	/** @type {MP4Box} */ box;
+	/** @type {ParserCtx} */ ctx;
+	
+	/**
+	 * @constructor
+	 * @param {MP4Box} box
+	 * @param {ParserCtx} ctx
+	 */
+	constructor(box, ctx) {
+		this.box = box;
+		this.ctx = ctx;
+	}
+}
+
+/**
+ * @type {Map<string, FastAccessNode[]>}
+ */
+const fastAccessMap = new Map();
+/**
+ * @param {string} atomType
+ * @param {string} handlerType
+ */
+fastAccessMap.findFromHandlerType = function(atomType, handlerType) {
+	return this.get(atomType).find(node => node.ctx.handlerType === handlerType);
+}
+/**
+ * @param {string} atomType
+ * @param {number} trackId
+ */
+fastAccessMap.findFromTrackId = function(atomType, trackId) {
+	return this.get(atomType).find(node => node.ctx.trackId === trackId);
 }
 
 
@@ -1090,12 +1136,20 @@ class ParserWorkTask {
 const testFilename = 'mp4-example-video-download-hd-1280x720.mp4';
 const testFilePath = 'test_files/' + testFilename;
 
-fetch(testFilePath).then(r => {
-	r.blob().then(function(blob) {
-		const file = new File([blob], testFilename);
-		new Parser(file);
-	});
-});
+//fetch(testFilePath).then(r => {
+//	r.blob().then(function(blob) {
+//		const file = new File([blob], testFilename);
+//		new Parser(blob);
+//	});
+//});
+
+
+
+
+
+
+
+
 
 
 
@@ -1108,20 +1162,9 @@ class FileDesc {
 }
 
 
-/**
- * @class
- * @property {AtomParser} atomParser
- * @property {ArrayBuffer} fileBuffer
- * @property {ArrayBuffer} headerBuffer
- * @property {DataView} headerView
- * @property {{'brand' : FtypBox, 'header' : MoovBox}}  fileStructure
- * @property {FileDesc} fileDesc
- * @property {number} pos
- * @property {number} trackNbr
- */
+
 class Parser {
 	atomParser = new AtomParser(new DataView(new ArrayBuffer(0)));
-	fileBuffer = new ArrayBuffer(0);
 	headerBuffer = new ArrayBuffer(0);
 	headerView = new DataView(new ArrayBuffer(0));
 	fileStructure;
@@ -1132,71 +1175,126 @@ class Parser {
 
 	/**
 	 * @constructor
-	 * @param {File} file
 	 */
-	constructor(file) {
-		this.readFile(file, this.init.bind(this));
+	constructor() {
+		
+	}
+	
+	/**
+	 * @param {string} action
+	 * @param {object} [params]
+	 */
+	handleMessage(action, params) {
+		if (typeof action !== 'undefined') {
+			return this[action](params);
+		}
+		return {type : 'error', cause : 'MP4Parser has no such action: ' + action};
 	}
 
 	/**
 	 * @param {File} file
-	 * @param {function} callback
+	 * @param {function} [callback]
 	 */
 	async readFile(file, callback) {
-		const self = this;
 		const reader = new FileReader();
-		if (file instanceof File) {
-			reader.onload = function(/** @type {ProgressEvent} */ evt) {
-				if (typeof callback === 'function') /** @ts-ignore evt.target cant be null in that case */
-					var result = callback.call(self, evt.target.result);
-				else	/** @ts-ignore evt.target cant be null in that case */
-					var result = evt.target.result;
-			}
-			reader.onprogress = function(loadEvent) {
-				var progress = loadEvent.loaded / loadEvent.total;
-			}
-
-			reader.readAsArrayBuffer(file);
+		if (file instanceof Blob) {
+			const fileContent = await file.arrayBuffer();
+			
+			if (typeof callback === 'function')
+				callback(fileContent);
+			else
+				var result = fileContent;
 		}
-		else console.error({ type: 'error', cause: 'The MP4Parser worker expects to receive a File instance' });
+		else
+			console.error({ type: 'error', cause: 'The MP4Parser worker expects to receive a File instance' });
+	}
+	
+	/**
+	 * Main entry-point of the parser
+	 * @param {File} file
+	 */
+	async init(file) {
+		console.log(file);
+		
+		// Try to find the header
+		const callback = this.identifyHeaderBoundaries.bind(this);
+		const fileChunkSize = Math.pow(10, 6);
+		let startOfFileChunk,
+			isLargeFile = false;
+		if (file.size > fileChunkSize) {
+			isLargeFile = true;
+			startOfFileChunk = file.slice(0, fileChunkSize);
+		}
+		else {
+			startOfFileChunk = file;
+		}
+		
+		
+		await this.readFile(startOfFileChunk, callback);
+		// header not found at beginning, try at the end
+		if (isLargeFile && !this.headerView.byteLength) {
+			const endOfFileChunk = file.slice(-fileChunkSize, 0);
+			await this.readFile(endOfFileChunk, callback);
+			if (!this.headerView.byteLength) {
+				return {type : 'error', cause : 'MP4 file header not found'};
+			}
+			else {
+				return {type : 'event', id : 'initSuccess'};
+			}
+		}
+		else {
+			return {type : 'event', id : 'initSuccess'};
+		}
+	}
+
+	/**
+	 * @method
+	 */
+	logInitResult() {
+		console.log('headerBuffer.byteLength', this.headerBuffer.byteLength);
+		console.log(this.fileStructure);
+		console.log(fastAccessMap);
+	}
+	
+	/**
+	 * @method
+	 */
+	parse() {
+		this.parseIterativeWorkStack(this.fileStructure.header);
+		this.logInitResult();
+		if (fastAccessMap.size > 0)
+			return {type : 'event', id : 'parseSuccess'};
+		else
+			return {type : 'error', cause : 'unkown parse error'};
+	}
+	
+	/**
+	 * @method
+	 * @param {ArrayBuffer} fileBuffer
+	 */
+	identifyHeaderBoundaries(fileBuffer) {
+		this.setFileStructure(fileBuffer);
+		if (this.headerView.byteLength) {
+			this.atomParser = new AtomParser(this.headerView);
+		}
 	}
 
 	/**
 	 * @method
 	 * @param {ArrayBuffer} fileBuffer
 	 */
-	init(fileBuffer) {
-		this.fileBuffer = fileBuffer.slice(0, Math.pow(10, 6));
-		console.log(this.fileBuffer);
-
-		this.setFileStructure();
-		this.atomParser = new AtomParser(this.headerView);
-
-		console.log('headerBuffer.byteLength', this.headerBuffer.byteLength);
-//		this.parseRecursive(
-//			constants.stdAtomHeaderSize,
-//			this.headerBuffer.byteLength - constants.stdAtomHeaderSize,
-//			this.fileStructure.header
-//		);
-		this.parseWithParentBacktrack(this.fileStructure.header);
-//		this.parseIterativeWorkStack(this.fileStructure.header);
-
-		console.log(this.fileStructure);
-	}
-
-	/**
-	 * @method
-	 */
-	setFileStructure() {
-		const fileView = new Uint8Array(this.fileBuffer);
+	setFileStructure(fileBuffer) {
+		const fileView = new Uint8Array(fileBuffer);
 
 		// Find ftyp atom boundaries
 		const [brandOffset, brandSize] = this.getMP4BrandBoundaries(fileView);
+		if (brandOffset === -1) return;
 		// Find moov atom boundaries
 		const moovOffset = bufferIndexOf(fileView, int8ArrayFromString('moov'));
+		if (moovOffset === -1) return;
 		const moovSize = buffer8getUint32(moovOffset - 4, fileView);
 
-		this.headerBuffer = this.fileBuffer.slice(moovOffset - 4, moovOffset - 4 + moovSize);
+		this.headerBuffer = fileBuffer.slice(moovOffset - 4, moovOffset - 4 + moovSize);
 		this.headerView = new DataView(this.headerBuffer);
 		
 		this.fileStructure = {
@@ -1215,115 +1313,165 @@ class Parser {
 		return [brandOffset, brandSize];
 	}
 
-	/**
-	 * @method
-	 * @param {number} boxSize
-	 * @param {MP4BoxType} currentBox
-	 * @return undefined
-	 */
-	parseRecursive(pos, boxSize, currentBox) {
-//		if (this.depthDebug > 1) return;
-
-		const originalPos = pos;
-		let isLarge = false, parsingRes = null;
-
-		while (pos < originalPos + boxSize) {
-			isLarge = false;
-			let atomSize = this.headerView.getUint32(pos);
-			const atomType = /** @type {keyof BoxRegistry} */ stringFromUint32(this.headerView, pos + 4);
-			
-			// see MP4Box typedef => if size === 1
-			if (atomSize === 1) {
-				atomSize = getUint64(this.headerView, this.pos);
-				isLarge = true;
-			}
-
-			if (atomType in this.atomParser) {
-				parsingRes = this.atomParser.newBox(atomType, pos, atomSize, currentBox, isLarge);
-				if (!parsingRes.isLeaf && atomSize > constants.stdAtomHeaderSize) {
-//					this.depthDebug++;
-					this.parseRecursive(pos + constants.stdAtomHeaderSize, atomSize - constants.stdAtomHeaderSize, parsingRes.newBox);
-//					this.depthDebug--;
-				}
-			}
-			pos += atomSize;
-		}
-	}
+//	/**
+//	 * @method
+//	 * @param {number} boxSize
+//	 * @param {MP4BoxType} currentBox
+//	 * @return undefined
+//	 */
+//	parseRecursive(pos, boxSize, currentBox) {
+//		const originalPos = pos;
+//		let isLarge = false, parsingRes = null;
+//
+//		while (pos < originalPos + boxSize) {
+//			isLarge = false;
+//			let atomSize = this.headerView.getUint32(pos);
+//			const atomType = /** @type {keyof BoxRegistry} */ stringFromUint32(this.headerView, pos + 4);
+//			
+//			// see MP4Box typedef => if size === 1
+//			if (atomSize === 1) {
+//				atomSize = getUint64(this.headerView, this.pos);
+//				isLarge = true;
+//			}
+//
+//			if (atomType in this.atomParser) {
+//				parsingRes = this.atomParser.newBox(atomType, pos, atomSize, currentBox, isLarge);
+//				if (!parsingRes.isLeaf && atomSize > constants.stdAtomHeaderSize) {
+//					this.parseRecursive(pos + constants.stdAtomHeaderSize, atomSize - constants.stdAtomHeaderSize, parsingRes.newBox);
+//				}
+//			}
+//			pos += atomSize;
+//		}
+//	}
+//	
+//	/**
+//	 * @method
+//	 * @param {MoovBox} rootNode
+//	 * @return undefined
+//	 */
+//	parseWithParentBacktrack(rootNode) {
+//		const hierarchyStack = [];
+//		let isLarge = false,
+//			parentNode = rootNode,
+//			currentNode = rootNode,
+//			pos = 8,
+//			atomType = '',
+//			atomSize = 0,
+//			/** @type {ParsingResult|null} */ parsingResult;
+//		hierarchyStack.push(rootNode);
+//		
+//		while (pos < rootNode.size) {
+//			parsingResult = null;
+//			isLarge = false;
+//			atomSize = this.headerView.getUint32(pos);
+//			atomType = /** @type {keyof BoxRegistry} */ stringFromUint32(this.headerView, pos + 4);
+//			
+//			// see MP4Box typedef => if size === 1
+//			if (atomSize === 1) {
+//				atomSize = getUint64(this.headerView, this.pos);
+//				isLarge = true;
+//			}
+//			
+//			if (atomType in this.atomParser) {
+//				parsingResult = this.atomParser.newBox(atomType, pos, atomSize, parentNode, isLarge);
+//				currentNode = parsingResult.newBox;
+//			}
+//			else {	// let's say unknown atoms also have boxes
+//				currentNode = createBox(atomType, pos, atomSize);
+//				parentNode.children.push(currentNode);
+//			}
+//			
+//			// Walk
+//			if (((parsingResult && !parsingResult.isLeaf) || currentNode instanceof ContainerBox) 
+//					&& atomSize > constants.stdAtomHeaderSize) {
+//				pos += 8;
+//				
+//				hierarchyStack.push(currentNode);
+//				parentNode = currentNode;
+//			}
+//			else {
+//				pos += atomSize;
+//				// Before depth 2, this test fails (parentNode.pos + parentNode.size === pos)
+//				// But deeper, the loop leaves the stack empty => enforce parentNode not being undefined,
+//				// while ensuring minimal stack size
+//				while(hierarchyStack.length > 1 && parentNode.pos + parentNode.size === pos) {
+//					parentNode = hierarchyStack.pop();
+//				}
+//			}
+//		}
+//	}
 	
 	/**
 	 * @method
 	 * @param {MoovBox} rootNode
 	 * @return undefined
 	 */
-	parseWithParentBacktrack(rootNode) {
-		const hierarchyStack = [];
-		let isLarge = false,
-			parentNode = rootNode,
-			currentNode = rootNode,
-			pos = 8,
-			atomType = '',
-			atomSize = 0,
-			/** @type {ParsingResult|null} */ parsingResult;
-		hierarchyStack.push(rootNode);
-		
-		while (pos < rootNode.size) {
-			parsingResult = null;
-			isLarge = false;
-			atomSize = this.headerView.getUint32(pos);
-			atomType = /** @type {keyof BoxRegistry} */ stringFromUint32(this.headerView, pos + 4);
-			
-			// see MP4Box typedef => if size === 1
-			if (atomSize === 1) {
-				atomSize = getUint64(this.headerView, this.pos);
-				isLarge = true;
-			}
-			
-			if (atomType in this.atomParser) {
-				parsingResult = this.atomParser.newBox(atomType, pos, atomSize, parentNode, isLarge);
-				currentNode = parsingResult.newBox;
-			}
-			else {	// let's say unknown atoms also have boxes
-				currentNode = createBox(atomType, pos, atomSize);
-				parentNode.children.push(currentNode);
-			}
-			
-			// Walk
-			if (((parsingResult && !parsingResult.isLeaf) || currentNode instanceof ContainerBox) 
-					&& atomSize > constants.stdAtomHeaderSize) {
-				pos += 8;
-				
-				hierarchyStack.push(currentNode);
-				parentNode = currentNode;
-			}
-			else {
-				pos += atomSize;
-				// Before depth 2, this test fails (parentNode.pos + parentNode.size === pos)
-				// But deeper, the loop leaves the stack empty => enforce parentNode not being undefined,
-				// while ensuring minimal stack size
-				while(hierarchyStack.length > 1 && parentNode.pos + parentNode.size === pos) {
-					parentNode = hierarchyStack.pop();
-				}
-			}
-		}
-	}
-	
 	parseIterativeWorkStack(rootNode) {
 		const workStack = [];
+		let isLarge = false,
+			atomType = '',
+			atomSize = 0,
+			/** @type {ParsingResult|null} */ parsingResult,
+			/** @type {MP4Box} */ node;
 		workStack.push(new ParserWorkTask(rootNode, 8, rootNode.size));
 	
 		while (workStack.length > 0) {
 			const task = workStack.pop();
 			let pos = task.start;
+			let end = task.end;
 	
-			while (pos < task.end) {
-				const atomSize = this.headerView.getUint32(pos);
-				const atomType = stringFromUint32(this.headerView, pos + 4);
-				const node = createBox(atomType, pos, atomSize);
-
-				task.parent.children.push(node);
-	
-				if (node instanceof ContainerBox) {
-					workStack.push(new ParserWorkTask(node, pos + 8, pos + atomSize));
+			while (pos < end) {
+				node = null;
+				parsingResult = null;
+				isLarge = false;
+				atomSize = this.headerView.getUint32(pos);
+				atomType = stringFromUint32(this.headerView, pos + 4);
+				
+				// see MP4Box typedef => if size === 1
+				if (atomSize === 1) {
+					atomSize = getUint64(this.headerView, this.pos);
+					isLarge = true;
+				}
+				
+				if (atomType in this.atomParser) {
+					if (atomSize <= constants.stdAtomHeaderSize) {
+						console.warn('MP4Parser:  malformed atom size for atom', atomType);
+						pos += constants.stdAtomHeaderSize;
+						continue;
+					}
+					if (atomType === "stsd") {
+		                parsingResult = this.atomParser.stsd(atomType, pos + constants.stdAtomHeaderSize, atomSize - constants.stdAtomHeaderSize, task.parent, task.parserCtx.handlerType);
+		            }
+		            else {
+						parsingResult = this.atomParser.newBox(atomType, pos, atomSize, task.parent, isLarge);
+					}
+					node = parsingResult.newBox;
+				}
+//				else {	// unknown atoms don't have boxes (they wouldn' have a name)
+//					node = createBox(atomType, pos, atomSize);
+//					task.parent.children.push(node);
+//				}
+				
+				// Ctx for sample description & fast access map
+				if (atomType === "tkhd") {
+					task.parserCtx = new ParserCtx();
+	                task.parserCtx.trackId = node.trackId;
+	            }
+	            else if (atomType === "hdlr") {
+	                task.parserCtx.handlerType = node.handlerType;
+	            }
+				
+				// Fast access map, to display a summarized file content
+				if (!fastAccessMap.has(atomType)) {
+					fastAccessMap.set(atomType, []);
+				}
+        		fastAccessMap.get(atomType).push(
+					new FastAccessNode(node, task.parserCtx)
+				);
+				
+				// recurse
+				if (parsingResult && !parsingResult.isLeaf) {
+					workStack.push(new ParserWorkTask(node, pos + 8, pos + atomSize, task.parserCtx));
 				}
 	
 				pos += atomSize;
@@ -1805,15 +1953,16 @@ class AtomParser {
 	/**
 	 * @method
 	 * Spec from ISO/IEC 14496-1:2001 13.2.3.17
-	 * An stblAttom contains one of stsdAtom, depending on handler-type, containing an exteension of SemplaeEntry : 
+	 * An stblAttom contains one of stsdAtom, depending on handler-type, containing an exteension of SampleEntry : 
 	 * SampleEntry ('mp4v'), SampleEntry ('mp4a'), SampleEntry ('mp4s') (last one is generic)
 	 * @param {keyof BoxRegister} fourcc
 	 * @param {number} currentPos
 	 * @param {number} size
 	 * @param {StblBox} parentAtom
+	 * @param {string} handlerType
 	 * @return {ParsingResult}
 	 */
-	stsd(fourcc, currentPos, size, parentAtom) {
+	stsd(fourcc, currentPos, size, parentAtom, handlerType) {
 		const box = new BoxRegistry[fourcc](currentPos, size);
 		parentAtom.children.push(box);
 		let offset = this.versionAndFlags(currentPos, box);
@@ -1823,12 +1972,16 @@ class AtomParser {
 		
 		// to SampleEntry
 		const nextSize = this.headerView.getUint32(offset);
+		const nextType = stringFromUint32(this.headerView, offset + 4);
 		offset += 8;
 		
-		switch(this.currentHandlerType) {
-			case 'vide' : this.mp4vSample('mp4v', offset, nextSize, box); break;
-			case 'soun' : this.mp4aSample('mp4a', offset, nextSize, box); break;
-			case 'hint' : this.hintSample('hint', offset, nextSize, box); break;
+		switch(handlerType) {
+			case 'vide' : 
+				if (this[nextType])
+					this[nextType](nextType, offset, nextSize - 8, box);
+				break;
+			case 'soun' : this.mp4aSample('mp4a', offset, nextSize - 8, box); break;
+			case 'hint' : this.hintSample('hint', offset, nextSize - 8, box); break;
 			default : break;
 		}
 		
@@ -1884,17 +2037,16 @@ class AtomParser {
 		box.sampleRate = this.headerView.getUint16(offset);
 		offset += 4;
 		
-		// to esds
-		const nextSize = this.headerView.getUint32(offset);
-		offset += 4;
-		const nextType = stringFromUint32(this.headerView, offset);
-		offset += 4;
-		
-		// SWITCH TO A WHILE LOOP
-		if (nextType === 'esds')
-			this.esds(nextType, offset, nextSize, box);
-		else
-			console.log('unkown atom found in mp4a SampleEntry:', nextType);
+		// to mandatory ESDescriptor ('esds') & optional BitRateBox ('btrt')
+		while(offset < currentPos + size) {
+			const nextSize = this.headerView.getUint32(offset);
+			offset += 4;
+			const nextType = stringFromUint32(this.headerView, offset);
+			offset += 4;
+			if (this[nextType])
+				this[nextType](nextType, offset, nextSize - constants.stdAtomHeaderSize, box,  'soun');
+			offset += nextSize - constants.stdAtomHeaderSize;
+		}
 	}
 	
 	/**
@@ -1926,7 +2078,7 @@ class AtomParser {
 	
 	/**
 	 * @method
-	 * not used in mp4 files
+	 * Mp4 files use a derived implem of SampleEntry
 	 * @param {keyof BoxRegister} fourcc
 	 * @param {number} currentPos
 	 * @param {number} size
@@ -1937,15 +2089,17 @@ class AtomParser {
 		
 	}
 	
+	
+	
 	/**
 	 * @method
-	 * Doesn't extend SampleEntry ('mp4v')
-	 * 
+	 * Extends SampleEntry ('coding_name')
+	 * ISO/IEC 14496-12:2015 12.1.3
 	 * @param {keyof BoxRegister} fourcc
 	 * @param {number} currentPos
 	 * @param {number} size
 	 * @param {StsdBox} parentAtom
-	 * @return {ParsingResult}
+	 * @return undefined
 	 */
 	avc1(fourcc, currentPos, size, parentAtom) {
 		const box = new BoxRegistry[fourcc](currentPos, size);
@@ -1970,30 +2124,39 @@ class AtomParser {
 		offset += 2;
 		box.height = this.headerView.getUint16(offset);
 		offset += 2;
-		box.horizontalResolution = this.headerView.getUint32(offset);
+		box.horizontalResolution = this.headerView.getUint32(offset) >> 16;
 		offset += 4;
-		box.verticalResolution = this.headerView.getUint32(offset);
+		box.verticalResolution = this.headerView.getUint32(offset) >> 16;
 		offset += 4;
 		box.dataSize = this.headerView.getUint32(offset);
 		offset += 4;
-		box.frameCount = this.headerView.getUint16(offset);
+		box.frameCount = this.headerView.getUint16(offset); // Generally ONE frame per sample
 		offset += 2;
-		box.videoEncodingNameSize = this.headerView.getUint8(offset);
+		box.compressorNameSize = this.headerView.getUint8(offset);
 		offset += 1;
-		box.videoEncodingName = stringFromBuffer(this.headerView, offset, box.videoEncodingNameSize);
+		box.compressorName = stringFromBuffer(this.headerView, offset, box.compressorNameSize);
 		offset += 31;
 		box.depth = this.headerView.getUint16(offset);
 		offset += 2;
-		box.colorTableId = this.headerView.getUint16(offset);
+		box.colorTableId = '0x' + this.headerView.getUint16(offset).toString(16);
 		offset += 2;
 		
+		// Fast access map, not handled in recursion for mixed type boxes (having props and children)
+		if (!fastAccessMap.has(fourcc)) {
+			fastAccessMap.set(fourcc, []);
+		}
+		fastAccessMap.get(fourcc).push(
+			new FastAccessNode(box, new ParserCtx('vide'))
+		);
+		
+		// to mandatory AVCConfigurationBox ('avcC') & optional MPEG4BitRateBox ('btrt')
 		while(offset < currentPos + size) {
 			const nextSize = this.headerView.getUint32(offset);
 			offset += 4;
 			const nextType = stringFromUint32(this.headerView, offset);
 			offset += 4;
 			if (this[nextType])
-				this[nextType](nextType, offset, nextSize - constants.stdAtomHeaderSize, box);
+				this[nextType](nextType, offset, nextSize - constants.stdAtomHeaderSize, box, 'vide');
 			offset += nextSize - constants.stdAtomHeaderSize;
 		}
 	}
@@ -2004,9 +2167,10 @@ class AtomParser {
 	 * @param {number} currentPos
 	 * @param {number} size
 	 * @param {Avc1Box} parentAtom
+	 * @param {'vide'} handlerType
 	 * @return undefined
 	 */
-	avcC(fourcc, currentPos, size, parentAtom) {
+	avcC(fourcc, currentPos, size, parentAtom, handlerType) {
 		const box = new BoxRegistry[fourcc](currentPos, size);
 		parentAtom.children.push(box);
 		let offset = currentPos;
@@ -2029,7 +2193,7 @@ class AtomParser {
 		//    -> 1/2 nibble NAL length = 2-bit length byte size type : 1 byte = 0 ; 2 bytes = 1 ; 4 bytes = 3
 		box.NAL_length = this.headerView.getUint8(offset) & 0x03; 
 		offset += 1;
-		//    -> 1 byte number of SPS = 8-bit unsigned total
+		//    -> 1 byte number of SPS = 8-bit unsigned total Sequence Parameter Set
 		box.number_of_SPS = this.headerView.getUint8(offset); 
 		offset += 1;
 		//    -> 2+ bytes SPS length = short unsigned length
@@ -2041,7 +2205,7 @@ class AtomParser {
 			box.SPS_NAL_unit += zeroFill(this.headerView.getUint8(offset).toString(16), 2);
 			offset += 1;
 		}
-		//    -> 1 byte number of PPS = 8-bit unsigned total
+		//    -> 1 byte number of PPS = 8-bit unsigned total Picture Parameter Set
 		box.number_of_PPS = this.headerView.getUint8(offset); 
 		offset += 1;
 		//    -> 2+ bytes PPS length = short unsigned length
@@ -2053,10 +2217,19 @@ class AtomParser {
 			box.PPS_NAL_unit += zeroFill(this.headerView.getUint8(offset).toString(16), 2);
 			offset += 1;
 		}
+		
+		// Fast access map, not handled in recursion for mixed type boxes (having props and children)
+		if (!fastAccessMap.has(fourcc)) {
+			fastAccessMap.set(fourcc, []);
+		}
+		fastAccessMap.get(fourcc).push(
+			new FastAccessNode(box, new ParserCtx('vide'))
+		);
 	}
 	
 	/**
 	 * @method
+	 * PixelAspectRatioBox
 	 * @param {keyof BoxRegister} fourcc
 	 * @param {number} currentPos
 	 * @param {number} size
@@ -2069,6 +2242,41 @@ class AtomParser {
 		let offset = currentPos;
 		box.hSpacing = this.headerView.getUint32(offset);
 		box.vSpacing = this.headerView.getUint32(offset);
+		
+		// Fast access map, not handled in recursion for mixed type boxes (having props and children)
+		if (!fastAccessMap.has(fourcc)) {
+			fastAccessMap.set(fourcc, []);
+		}
+		fastAccessMap.get(fourcc).push(
+			new FastAccessNode(box, new ParserCtx('vide'))
+		);
+	}
+	
+	/**
+	 * @method
+	 * @param {keyof BoxRegister} fourcc
+	 * @param {number} currentPos
+	 * @param {number} size
+	 * @param {StsdBox} parentAtom
+	 * @param {'vide'|'soun'} handlerType
+	 * @return undefined
+	 */
+	btrt(fourcc, currentPos, size, parentAtom, handlerType) {
+		const box = new BoxRegistry[fourcc](currentPos, size);
+		parentAtom.children.push(box);
+		let offset = currentPos;
+		
+		box.bufferSizeDB = this.headerView.getUint32(offset);
+		box.maxBitrate = this.headerView.getUint32(offset);
+		box.avgBitrate = this.headerView.getUint32(offset);
+		
+		// Fast access map, not handled in recursion for mixed type boxes (having props and children)
+		if (!fastAccessMap.has(fourcc)) {
+			fastAccessMap.set(fourcc, []);
+		}
+		fastAccessMap.get(fourcc).push(
+			new FastAccessNode(box, new ParserCtx(handlerType))
+		);
 	}
 	
 	/**
@@ -2522,15 +2730,6 @@ class AtomParser {
 	}
 	
 	
-	
-	
-	
-	
-	
-	
-	
-	
-	
 
 	versionAndFlags(currentPos, box) {
 		box.version = this.headerView.getUint8(currentPos);
@@ -2685,3 +2884,41 @@ class AtomParser {
 }
 
 
+
+
+
+
+
+
+
+
+
+const thisName = 'The MP4 parser';
+const workerImplem = new Parser();
+
+onmessage = function(event) {
+	try {
+		if (Array.isArray(event.data)) {
+			var result = workerImplem.handleMessage(...event.data);
+			if (result instanceof Promise) {
+				result.then(function(res) {
+					postMessage(res);
+				});
+			}
+			else if (result)
+				postMessage(result);
+			else
+				postMessage({type : 'warning', cause : thisName + ' didn\'t return anything.'});
+		}
+		else {
+			postMessage({type : 'error', cause : thisName + ' expects an array as payload. ' + typeof event.data + ' received'});
+		}
+	}
+	catch (e) {
+		postMessage({type : 'error', cause : e.message});
+	}
+}
+
+function sendResponse(res) {
+	postMessage(res);
+}
