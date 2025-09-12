@@ -3,6 +3,8 @@ const {App, TemplateFactory} = require('formantjs');
 const videoFileModel = require('src/App/valueObjects/videoFileModel');
 const normalizeTree = require('src/App/transform/MP4ParserTreeNormalize');
 
+const injectPanels = require('src/App/UIParts/injectPanels');
+
 const testFilename = 'Big_Buck_Bunny_360_10s_2MB.mp4';
 const testFilePath = 'test_files/' + testFilename;
 const workerPath = 'workers/MP4ParserWorker.js';
@@ -20,6 +22,7 @@ module.exports = function(parentView) {
 			
 			const dropZone = new App.componentTypes.FileDropZone(TemplateFactory.mockDef(), root.view);
 			const UIStructureComponent = new App.coreComponentLib.FlexRowComponent(TemplateFactory.mockGroupDef(), root.view);
+			injectPanels(UIStructureComponent);
 			const parser = new App.Worker('mp4Parser', null, workerPath);
 			
 			const self = this;

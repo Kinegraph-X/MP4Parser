@@ -410,11 +410,35 @@ class DescriptorContainer extends BaseDescriptor {
 
 /**
  * ESDescriptor (in this implementation, is handled directly in esds atom)
+ * @extends {ContainerBox<DecoderConfigDescriptor|SLConfigDescriptor>}
  */
-class ESDescriptor extends DescriptorContainer {}
-class DecoderConfigDescriptor extends DescriptorContainer {}
-class SLConfigDescriptor extends BaseDescriptor {}
-class DecoderSpecificConfigDescriptor extends BaseDescriptor {}
+class ESDescriptor extends DescriptorContainer {
+	
+}
+/**
+ *@extends {ContainerBox<DecoderSpecificConfigDescriptor>}
+ */
+class DecoderConfigDescriptor extends DescriptorContainer {
+	objectTypeId = ''; 	// MPEG-4 audio = 64 (0x40); MPEG-4 video = 32 (0x20); H264 video = 241
+	objectTypeId_HR = '';
+	streamType = 0; 	// 6 bits stream type = 3/4 byte hex value
+	/*
+	 * 	- type IDs are object descript. = 1 ; clock ref. = 2
+	    - type IDs are scene descript. = 4 ; visual = 4
+	    - type IDs are audio = 5 ; MPEG-7 = 6 ; IPMP = 7
+	    - type IDs are OCI = 8 ; MPEG Java = 9
+	    - type IDs are user private = 32
+	 */
+	bufferSize = 0;
+	maximumBitRate = 0; 
+	averageBitRate = 0;
+}
+class SLConfigDescriptor extends BaseDescriptor {
+	SLValue = '';
+}
+class DecoderSpecificConfigDescriptor extends BaseDescriptor {
+	ESHeaderStartCodes = '';
+}
 
 
 /**
@@ -454,13 +478,6 @@ class PaspBox extends MP4FullBox {
 	vSpacing = 0;
 }
 
-/**
- * ES Descriptor Box (contained by an esds box)
- */
-class ESDescriptorBox extends MP4Box {
-	type = "ESDescriptor";
-	
-}
 
 
 /**
@@ -836,22 +853,24 @@ class Avc1Box extends ContainerBox {
 
 /**
  * ES Descriptor container box
- * @extends {ContainerBox<ESDescriptorBox>}
+ * @extends {ContainerFullBox<DecoderConfigDescriptor|SLConfigDescriptor>}
  */
 class EsdsBox extends ContainerFullBox {
 	type = 'esds';
-	ES_descriptor_type = ''; // 0x03
+	ESDescriptorType = ''; // 0x03
 	// length remaining after length_byte :  as found on real cases : length includes 0x04, 0x05 and 0x06 ES_Descriptor (should exclude trailing descriptors)
-	descriptor_length = 0;			// uint8
-	ES_ID = 0;						// uint16
-	stream_dependance_flag = 0;		// uint8
-	url_flag = 0;					// uint8
-	stream_priority = 0;			// uint8 ?
+	descriptorLength = 0;			// uint8
+	ESId = 0;						// uint16
+	streamPriority = 0;			// uint8 ?
+	dependsOnESID = 0;
+	OCR_ES_Id = 0;
+	url = '';
 }
+
 
 /**
  * Sample Descriptor (special) box (contains derived atoms from SampleEntry, most frequently avc1 type)
- * @extends {ContainerBox<SampleEntry>}
+ * @extends {ContainerFullBox<SampleEntry|Mp4aBox|Avc1Box>}
  */
 class StsdBox extends ContainerFullBox {
 	type = "stsd";
@@ -1157,9 +1176,6 @@ const testFilePath = 'test_files/' + testFilename;
 
 
 
-class FileDesc {
-	mp4Brand = new FtypBox();
-}
 
 
 
@@ -1168,8 +1184,6 @@ class Parser {
 	headerBuffer = new ArrayBuffer(0);
 	headerView = new DataView(new ArrayBuffer(0));
 	fileStructure;
-	fileDesc = new FileDesc();
-	pos = constants.stdAtomHeaderSize;
 	trackNbr = 0;
 	depthDebug = 0;
 
@@ -1298,7 +1312,7 @@ class Parser {
 		this.headerView = new DataView(this.headerBuffer);
 		
 		this.fileStructure = {
-			brand: this.atomParser.ftyp('ftyp', fileView, brandOffset + 4, brandSize).newBox,
+			brand: this.atomParser.ftyp('ftyp', fileView, brandOffset + 4, brandSize),
 			header: new BoxRegistry.moov(0, this.headerBuffer.byteLength)
 		};
 	}
@@ -1493,7 +1507,6 @@ class ParsingResult {
  */
 class AtomParser {
 	headerView;
-	currentHandlerType;
 
 	/**
 	 * @constructor
@@ -1525,7 +1538,7 @@ class AtomParser {
 	 * @param {number} currentPos
 	 * @param {number} size
 	 * @param {MP4Box} parentAtom
-	 * @return {ParsingResult}
+	 * @return {FtypBox}
 	 */
 	ftyp(fourcc, fileView, currentPos, size) {
 		let offset = currentPos;
@@ -1536,7 +1549,7 @@ class AtomParser {
 		offset += 4;
 		for (offset; offset < currentPos + size; offset += 4)
 			box.compatibleBrands.push(stringFromUint32(fileView, offset));
-		return new ParsingResult(false, box);
+		return box;
 	}
 
 	/**
@@ -2321,9 +2334,9 @@ class AtomParser {
 			offset += 3;
 		}
 		// length_byte : length remaining after this byte
-		const descriptor_length = this.headerView.getUint8(offset);
+		const descriptorLength = this.headerView.getUint8(offset);
 		offset += 1;
-		box.ES_ID = this.headerView.getUint16(offset);
+		box.ESId = this.headerView.getUint16(offset);
 		offset += 2;
 		const flags = this.headerView.getUint8(offset);
 		const streamDependancyFlag = flags & 0x80;
@@ -2332,7 +2345,7 @@ class AtomParser {
 		box.stream_priority = (flags << 3) >>> 3;
 		offset += 1;
 		if (streamDependancyFlag) {
-			box.dependsOn_ES_ID = this.headerView.getUint16(offset);
+			box.dependsOnESID = this.headerView.getUint16(offset);
 			offset += 2;
 		}
 		// ISO_IEC_14496-1_1998 p24 (pdf p47)
@@ -2373,10 +2386,10 @@ class AtomParser {
 		const descriptor = new DecoderConfigDescriptor(this.descriptorClassTagTable[nextTag], size);
 		parentBox.children.push(descriptor);
 		
-		descriptor.object_type_ID = '0x' + this.headerView.getUint8(offset).toString(16); 	// MPEG-4 audio = 64 (0x40); MPEG-4 video = 32 (0x20); H264 video = 241
-		descriptor.object_type_ID_HR =  this.object_type_ID[parseInt(descriptor.object_type_ID)];
+		descriptor.objectTypeId = '0x' + this.headerView.getUint8(offset).toString(16); 	// MPEG-4 audio = 64 (0x40); MPEG-4 video = 32 (0x20); H264 video = 241
+		descriptor.objectTypeId_HR =  this.objectTypeIdTable[parseInt(descriptor.objectTypeId)];
 		offset += 1;
-		descriptor.stream_type = this.headerView.getUint8(offset) >>> 2; 	// 6 bits stream type = 3/4 byte hex value
+		descriptor.streamType = this.headerView.getUint8(offset) >>> 2; 	// 6 bits stream type = 3/4 byte hex value
 		/*
 		 * 	- type IDs are object descript. = 1 ; clock ref. = 2
 		    - type IDs are scene descript. = 4 ; visual = 4
@@ -2385,11 +2398,11 @@ class AtomParser {
 		    - type IDs are user private = 32
 		 */
 		offset += 1;
-		descriptor.buffer_size = this.headerView.getUint32(offset) >>> 8;
+		descriptor.bufferSize = this.headerView.getUint32(offset) >>> 8;
 		offset += 3;
-		descriptor.maximum_bit_rate = this.headerView.getUint32(offset); 
+		descriptor.maximumBitRate = this.headerView.getUint32(offset); 
 		offset += 4;
-		descriptor.average_bit_rate = this.headerView.getUint32(offset);
+		descriptor.averageBitRate = this.headerView.getUint32(offset);
 		offset += 4;
 		
 		nextTag = this.headerView.getUint8(offset);
@@ -2409,9 +2422,9 @@ class AtomParser {
 		const descriptor = new DecoderSpecificConfigDescriptor(this.descriptorClassTagTable[nextTag], size);
 		parentBox.children.push(descriptor);
 		
-		descriptor.ES_header_start_codes = '0x';
+		descriptor.ESHeaderStartCodes = '0x';
 		while (offset < currentPos + size) { // Every stream or table begins with a 32-bit start code : 0x01 - 0xAF means "slice"
-			descriptor.ES_header_start_codes += this.headerView.getUint8(this.pos).toString(16); 	// ES header start codes = hex dump
+			descriptor.ESHeaderStartCodes += this.headerView.getUint8(this.pos).toString(16); 	// ES header start codes = hex dump
 			offset += 1;
 		}
 	}
@@ -2433,7 +2446,7 @@ class AtomParser {
 		parentBox.children.push(descriptor);
 		
 		// ISO_IEC_14496-1_1998 10.2.3.1 : if (predefined==0) { [...] }
-		descriptor.SL_value = '0x' + this.headerView.getUint8(this.pos).toString(16); 	// bit(8) predefined : 0x02 - 0xFF : Reserved for ISO use
+		descriptor.SLValue = '0x' + this.headerView.getUint8(this.pos).toString(16); 	// bit(8) predefined : 0x02 - 0xFF : Reserved for ISO use
 	}
 
 	/**
@@ -2847,7 +2860,7 @@ class AtomParser {
 	45 	USAC[45] 		2012[46] (it will be also defined in MPEG-D Part 3 – ISO/IEC 23003-3[47]) 
 	*/
 	// http://xhelmboyx.tripod.com/formats/mp4-layout.txt
-	object_type_ID = {
+	objectTypeIdTable = {
 		1 : 'system v1',
 		2 : 'system v2',
 		32 : 'MPEG-4 video',
